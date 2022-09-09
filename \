@@ -1,0 +1,79 @@
+import pandas as pd
+import warnings
+import numpy as np
+import cvxopt as opt
+from cvxopt import blas, solvers
+from pypfopt import EfficientFrontier
+from sklearn.decomposition import PCA
+import statsmodels.api as sm
+import os
+
+warnings.filterwarnings("ignore")
+os.chdir("/home/sahil/Downloads")
+
+k = pd.read_excel("TAP-excel.xlsx")
+
+# Function creates a columns of log returns and percentage returns for each asset in the DataFrame
+def gen_ret(k1):
+    assets = [
+        i for i in k1.columns if i != "DATE"
+    ]  # Extracting Column names of all assets
+
+    for asset in assets:
+        k1[asset + "_logret"] = (
+            np.log(k1[asset] / k1[asset].shift(1)) * 100
+        )  # Calculating log returns for an asset
+        k1[asset + "_perret"] = (
+            k1[asset].pct_change() * 100
+        )  # Calculating percentage Returns for an asset
+    return k1
+
+
+# k1 = gen_ret(k1)
+expected = {}
+mu = {}
+var = {}
+beta = {}
+resid_var = {}
+k['index_ret'] = k["Index Return "]
+assets_returns_cols = [i for i in k.columns[1:]]
+for i in assets_returns_cols:
+    ret_col_name = f"{i}_ret"
+    if i == "Index Return ":
+        y = k[ret_col_name].dropna() - 0.02 / 252
+    else:
+        k[f"{i}_ret"] = np.log(k[i] / k[i].shift(1))
+        y = k[ret_col_name].dropna()
+        y = y - 0.02 / 252
+    x = k["Index Return "].dropna()
+    x = x - 0.02 / 252
+    x = sm.add_constant(x)
+    model = sm.OLS(y, x)
+    res = model.fit()
+    resid_var[f"{i}_resid_var"] = res.resid.var()
+    beta_asset = res.params["index_ret"]
+    alpha = res.params["const"]
+    beta[f"{i}_beta"] = beta_asset
+    mu[f"{i}_expected"] = (
+        alpha + beta_asset * (k["index_ret"] - 0.02 / 252).mean()
+    ) * 252
+    var[f"{i}_variance"] = k[f"{i}_ret"].var() * 252
+cov = pd.DataFrame(index=assets_returns_cols, columns=assets_returns_cols)
+for i in range(48):
+    for j in range(48):
+        ret_col1 = k.columns[i + 2]
+        ret_col2 = k.columns[j + 2]
+        cov.loc[ret_col1][ret_col2] = (
+            beta[f"{ret_col1}_beta"]
+            * beta[f"{ret_col2}_beta"]
+            * k["index_ret"].var()
+            * 252
+        )
+beta = np.matrix(pd.Series(beta))
+resid = np.diag(list(pd.Series(resid_var)))
+covar = (beta.T * beta * k["Index Return "].var() + resid) * 252
+mu = np.array(pd.Series(mu))
+ef = EfficientFrontier(mu, covar, weight_bounds=(-1, 1))
+ef.max_sharpe(risk_free_rate=0.02)
+print(ef.weights)
+print(ef.portfolio_performance(verbose=True))
